@@ -24,6 +24,14 @@ INACTIVE_ORDER_ENDPOINT = "order/v8/inactive"
 CREATE_ORDER_ENDPOINT = "order/v8/create/"
 ABORT_ORDER_ENDPOINT = "order/v8/{}/abort"
 ORDER_STATUS_ENDPOINT = "order/v8/{}/status"
+
+PAY_ORDER_ENDPOINT = "order/v7/{}/pay"
+PAYMENT_STATUS_ENDPOINT = "payment/v3/{}"
+BASE_URL_ADYEN = "https://checkoutshopper-live.adyen.com/"
+ADYEN_KEY_ENDPOINT = (
+    "checkoutshopper/v1/clientKeys/live_VPX45BIMLFAIVARYVKEDNC7OXIFBRQZ5"
+)
+
 API_BUCKET_ENDPOINT = "discover/v1/bucket"
 DEFAULT_APK_VERSION = "24.11.0"
 USER_AGENTS = [
@@ -423,6 +431,79 @@ class TgtgClient:
             self._get_url(INACTIVE_ORDER_ENDPOINT),
             headers=self._headers,
             json={"paging": {"page": page, "size": page_size}},
+            proxies=self.proxies,
+            timeout=self.timeout,
+        )
+        if response.status_code == HTTPStatus.OK:
+            return response.json()
+        else:
+            raise TgtgAPIError(response.status_code, response.content)
+
+    def pay_order(self, order_id, card_data: dict[str, str]):
+        self.login()
+        headers = {
+            "User-Agent": USER_AGENTS[2],
+            "Host": "checkoutshopper-live.adyen.com",
+            "Connection": "Keep-Alive",
+        }
+
+        url = urljoin(BASE_URL_ADYEN, ADYEN_KEY_ENDPOINT)
+        response = requests.request("GET", url, headers=headers, data={})
+
+        ADYEN_KEY = response.json()["publicKey"]
+
+        enc = encryptor(ADYEN_KEY)
+        enc.adyen_version = "_0_1_1"
+        card = enc.encrypt_card(
+            card=card_data["card"],
+            cvv=card_data["cvv"],
+            month=card_data["month"],
+            year=card_data["year"],
+        )
+
+        inner_payload = {
+            "type": "scheme",
+            "encryptedCardNumber": card["card"],
+            "encryptedExpiryMonth": card["month"],
+            "encryptedExpiryYear": card["year"],
+            "encryptedSecurityCode": card["cvv"],
+            "threeDS2SdkVersion": "2.2.10",
+        }
+
+        inner_payload_str = json.dumps(inner_payload).replace("/", "\/")
+        payload = {
+            "authorization": {
+                "authorization_payload": {
+                    "payload": inner_payload_str,
+                    "payment_type": "CREDITCARD",
+                    "save_payment_method": False,
+                    "type": "adyenAuthorizationPayload",
+                },
+                "payment_provider": "ADYEN",
+                "return_url": "adyencheckout://com.app.tgtg.itemview",
+            }
+        }
+
+        payload_str = json.dumps(payload)
+
+        response = self.session.post(
+            url=self._get_url(PAY_ORDER_ENDPOINT.format(order_id)),
+            headers=self._headers,
+            data=payload_str,
+            proxies=self.proxies,
+            timeout=self.timeout,
+        )
+
+        if response.status_code == HTTPStatus.OK:
+            return response.json()
+        else:
+            raise TgtgAPIError(response.status_code, response.content)
+
+    def get_payment_status(self, payment_id: str):
+        self.login()
+        response = self.session.post(
+            self._get_url(PAYMENT_STATUS_ENDPOINT.format(payment_id)),
+            headers=self._headers,
             proxies=self.proxies,
             timeout=self.timeout,
         )
